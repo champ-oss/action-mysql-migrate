@@ -1,0 +1,160 @@
+name: runner-test
+
+on:
+  workflow_call:
+    inputs:
+      user:
+        description: 'Username'
+        required: false
+        default: 'root'
+        type: string
+      schema:
+        description: 'Schema'
+        required: false
+        default: 'this'
+        type: string
+      region:
+        description: 'AWS Region'
+        required: false
+        default: 'us-east-2'
+        type: string
+      repo:
+        description: 'Repo name (to look up password in SSM)'
+        required: true
+        type: string
+      source:
+        description: 'Source Endpoint'
+        required: true
+        type: string
+      target:
+        description: 'Target Endpoint'
+        required: true
+        type: string
+      enablechecksum:
+        description: 'Checksum and compare all tables'
+        required: false
+        type: boolean
+        default: true
+      enablerowcount:
+        description: 'Compare row counts'
+        required: false
+        type: boolean
+        default: true
+      readonly:
+        description: 'Set source to read-only'
+        required: false
+        type: boolean
+        default: false
+      droptargettables:
+        description: 'Drop all tables on target'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  runner-test:
+    runs-on: self-hosted
+    steps:
+      - name: get versions
+        run: |
+          pwd
+          ls -lah
+          mysqldump --version
+
+      - name: get source name
+        run: echo "SOURCE_NAME=$(echo  ${{ inputs.source }} | cut -d . -f1)" >> $GITHUB_ENV
+        
+      - name: get source password
+        run: |
+          export SOURCE_PASSWORD=$(aws ssm get-parameter --region ${{ inputs.region }} --name $SOURCE_NAME-mysql --with-decryption --query Parameter.Value --output text)
+          echo "::add-mask::$SOURCE_PASSWORD"
+          echo "SOURCE_PASSWORD=$SOURCE_PASSWORD" >> $GITHUB_ENV
+        
+      - name: get target name
+        run: echo "TARGET_NAME=$(echo  ${{ inputs.target }} | cut -d . -f1)" >> $GITHUB_ENV
+        
+      - name: get target password
+        run: |
+          export TARGET_PASSWORD=$(aws ssm get-parameter --region ${{ inputs.region }} --name "/${{ inputs.repo }}/mysql/$TARGET_NAME/password" --with-decryption --query Parameter.Value --output text)
+          echo "::add-mask::$TARGET_PASSWORD"
+          echo "TARGET_PASSWORD=$TARGET_PASSWORD" >> $GITHUB_ENV
+        
+      - name: show source tables
+        run: mysql -v -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;"
+
+      - name: show target tables
+        run: mysql -v -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;"
+
+      - name: set source to read-only
+        if: ${{ inputs.readonly == true }} 
+        run: mysql -v -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "ALTER DATABASE ${{ inputs.schema }} READ ONLY = 1;"
+
+      - name: drop target database
+        if: ${{ inputs.droptargettables == true }} 
+        run: |
+          mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -e "DROP DATABASE ${{ inputs.schema }};" || true
+          mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -e "CREATE DATABASE ${{ inputs.schema }};"
+
+      - name: mysqldump source
+        run: |
+          mysqldump -v -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" --set-gtid-purged=OFF ${{ inputs.schema }} > $SOURCE_NAME.sql
+          ls -lah
+
+      - name: restore
+        run: pv -p -f -e -b -r $SOURCE_NAME.sql | mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" ${{ inputs.schema }}
+
+      - name: checksum source
+        if: ${{ inputs.enablechecksum == true }} 
+        run: |
+          mysql -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;" | while read TBL;
+          do 
+            echo "Getting checksum for table: $TBL"
+            mysql -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "CHECKSUM TABLE $TBL;" >> $SOURCE_NAME-checksum.txt
+          done
+          cat $SOURCE_NAME-checksum.txt
+
+      - name: checksum target
+        if: ${{ inputs.enablechecksum == true }} 
+        run: |
+          mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;" | while read TBL;
+          do 
+            echo "Getting checksum for table: $TBL"
+            mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "CHECKSUM TABLE $TBL;" >> $TARGET_NAME-checksum.txt
+          done
+          cat $TARGET_NAME-checksum.txt
+
+      - name: compare checksum
+        if: ${{ inputs.enablechecksum == true }} 
+        run: diff -y --suppress-common-lines $SOURCE_NAME-checksum.txt $TARGET_NAME-checksum.txt
+
+      - name: get source rows
+        if: ${{ inputs.enablerowcount == true }} 
+        run: |
+          mysql -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;" | while read TBL;
+          do 
+            if [[ "$TBL" == "Tables_in_this" ]]; then continue; fi
+            echo "Getting row count for table: $TBL" >> $SOURCE_NAME-rows.txt
+            mysql -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "SELECT COUNT(*) FROM $TBL;" >> $SOURCE_NAME-rows.txt
+          done
+          cat $SOURCE_NAME-rows.txt
+        
+      - name: get target rows
+        if: ${{ inputs.enablerowcount == true }} 
+        run: |
+          mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;" | while read TBL;
+          do
+            if [[ "$TBL" == "Tables_in_this" ]]; then continue; fi
+            echo "Getting row count for table: $TBL" >> $TARGET_NAME-rows.txt
+            mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "SELECT COUNT(*) FROM $TBL;" >> $TARGET_NAME-rows.txt
+          done
+          cat $TARGET_NAME-rows.txt
+        
+      - name: compare table rows
+        if: ${{ inputs.enablerowcount == true }} 
+        run: diff -y --suppress-common-lines $SOURCE_NAME-rows.txt $TARGET_NAME-rows.txt
+
+      - name: clean up
+        if: always()
+        run: |
+          rm *.sql
+          rm *.txt
