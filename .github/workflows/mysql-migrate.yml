@@ -1,4 +1,4 @@
-name: runner-test
+name: mysql-migrate
 
 on:
   workflow_call:
@@ -52,7 +52,7 @@ on:
         default: false
 
 jobs:
-  runner-test:
+  mysql-migrate:
     runs-on: self-hosted
     steps:
       - name: get versions
