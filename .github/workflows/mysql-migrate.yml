@@ -50,6 +50,12 @@ on:
         required: false
         type: boolean
         default: false
+      sourcessm:
+        description: 'Source password SSM name'
+        required: false
+        default: ''
+        type: string
+
 
 jobs:
   mysql-migrate:
@@ -66,7 +72,11 @@ jobs:
         
       - name: get source password
         run: |
-          export SOURCE_PASSWORD=$(aws ssm get-parameter --region ${{ inputs.region }} --name $SOURCE_NAME-mysql --with-decryption --query Parameter.Value --output text)
+          if [[ "${{ inputs.sourcessm }}" != "" ]]; then 
+            export SOURCE_PASSWORD=$(aws ssm get-parameter --region ${{ inputs.region }} --name ${{ inputs.sourcessm }} --with-decryption --query Parameter.Value --output text)
+          else
+            export SOURCE_PASSWORD=$(aws ssm get-parameter --region ${{ inputs.region }} --name $SOURCE_NAME-mysql --with-decryption --query Parameter.Value --output text)
+          fi
           echo "::add-mask::$SOURCE_PASSWORD"
           echo "SOURCE_PASSWORD=$SOURCE_PASSWORD" >> $GITHUB_ENV
         
