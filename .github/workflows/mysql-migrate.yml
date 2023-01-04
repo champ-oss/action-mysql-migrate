@@ -97,7 +97,10 @@ jobs:
 
       - name: mysqldump source
         run: |
-          mysqldump -v -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" --set-gtid-purged=OFF ${{ inputs.schema }} > $SOURCE_NAME.sql
+          if [[ "${{ inputs.readonly }}" == "false" ]]; then 
+            export SKIP_LOCK="--single-transaction --skip-lock-tables"
+          fi
+          mysqldump -v -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" --set-gtid-purged=OFF $SKIP_LOCK ${{ inputs.schema }} > $SOURCE_NAME.sql
           ls -lah
 
       - name: restore
