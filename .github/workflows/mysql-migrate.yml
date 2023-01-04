@@ -1,4 +1,4 @@
-name: runner-test
+name: mysql-migrate
 
 on:
   workflow_call:
@@ -50,9 +50,15 @@ on:
         required: false
         type: boolean
         default: false
+      sourcessm:
+        description: 'Source password SSM name'
+        required: false
+        default: ''
+        type: string
+
 
 jobs:
-  runner-test:
+  mysql-migrate:
     runs-on: self-hosted
     steps:
       - name: get versions
@@ -66,7 +72,11 @@ jobs:
         
       - name: get source password
         run: |
-          export SOURCE_PASSWORD=$(aws ssm get-parameter --region ${{ inputs.region }} --name $SOURCE_NAME-mysql --with-decryption --query Parameter.Value --output text)
+          if [[ "${{ inputs.sourcessm }}" != "" ]]; then 
+            export SOURCE_PASSWORD=$(aws ssm get-parameter --region ${{ inputs.region }} --name ${{ inputs.sourcessm }} --with-decryption --query Parameter.Value --output text)
+          else
+            export SOURCE_PASSWORD=$(aws ssm get-parameter --region ${{ inputs.region }} --name $SOURCE_NAME-mysql --with-decryption --query Parameter.Value --output text)
+          fi
           echo "::add-mask::$SOURCE_PASSWORD"
           echo "SOURCE_PASSWORD=$SOURCE_PASSWORD" >> $GITHUB_ENV
         
@@ -97,35 +107,14 @@ jobs:
 
       - name: mysqldump source
         run: |
-          mysqldump -v -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" --set-gtid-purged=OFF ${{ inputs.schema }} > $SOURCE_NAME.sql
+          if [[ "${{ inputs.readonly }}" == "false" ]]; then 
+            export SKIP_LOCK="--single-transaction --skip-lock-tables"
+          fi
+          mysqldump -v -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" --set-gtid-purged=OFF $SKIP_LOCK ${{ inputs.schema }} > $SOURCE_NAME.sql
           ls -lah
 
       - name: restore
         run: pv -p -f -e -b -r $SOURCE_NAME.sql | mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" ${{ inputs.schema }}
-
-      - name: checksum source
-        if: ${{ inputs.enablechecksum == true }} 
-        run: |
-          mysql -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;" | while read TBL;
-          do 
-            echo "Getting checksum for table: $TBL"
-            mysql -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "CHECKSUM TABLE $TBL;" >> $SOURCE_NAME-checksum.txt
-          done
-          cat $SOURCE_NAME-checksum.txt
-
-      - name: checksum target
-        if: ${{ inputs.enablechecksum == true }} 
-        run: |
-          mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;" | while read TBL;
-          do 
-            echo "Getting checksum for table: $TBL"
-            mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "CHECKSUM TABLE $TBL;" >> $TARGET_NAME-checksum.txt
-          done
-          cat $TARGET_NAME-checksum.txt
-
-      - name: compare checksum
-        if: ${{ inputs.enablechecksum == true }} 
-        run: diff -y --suppress-common-lines $SOURCE_NAME-checksum.txt $TARGET_NAME-checksum.txt
 
       - name: get source rows
         if: ${{ inputs.enablerowcount == true }} 
@@ -152,6 +141,30 @@ jobs:
       - name: compare table rows
         if: ${{ inputs.enablerowcount == true }} 
         run: diff -y --suppress-common-lines $SOURCE_NAME-rows.txt $TARGET_NAME-rows.txt
+
+      - name: checksum source
+        if: ${{ inputs.enablechecksum == true }} 
+        run: |
+          mysql -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;" | while read TBL;
+          do 
+            echo "Getting checksum for table: $TBL"
+            mysql -h ${{ inputs.source }} -u ${{ inputs.user }} --password="$SOURCE_PASSWORD" -D ${{ inputs.schema }} -e "CHECKSUM TABLE $TBL;" >> $SOURCE_NAME-checksum.txt
+          done
+          cat $SOURCE_NAME-checksum.txt
+
+      - name: checksum target
+        if: ${{ inputs.enablechecksum == true }} 
+        run: |
+          mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "SHOW TABLES;" | while read TBL;
+          do 
+            echo "Getting checksum for table: $TBL"
+            mysql -h ${{ inputs.target }} -u ${{ inputs.user }} --password="$TARGET_PASSWORD" -D ${{ inputs.schema }} -e "CHECKSUM TABLE $TBL;" >> $TARGET_NAME-checksum.txt
+          done
+          cat $TARGET_NAME-checksum.txt
+
+      - name: compare checksum
+        if: ${{ inputs.enablechecksum == true }} 
+        run: diff -y --suppress-common-lines $SOURCE_NAME-checksum.txt $TARGET_NAME-checksum.txt
 
       - name: clean up
         if: always()
